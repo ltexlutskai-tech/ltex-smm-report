@@ -187,6 +187,8 @@ body{background:var(--bg);color:var(--text);font-family:'Manrope',sans-serif;fon
     <button class="btn bs" onclick="openTgt()">⚙️ Цілі</button>
     <button class="btn bs" onclick="sendEmail()">✉️ Надіслати</button>
     <button class="btn bp" id="saveBtn" onclick="saveReport()">💾 Зберегти</button>
+    <button class="btn bs" onclick="openCloud()" title="Синхронізація з Google-таблицею">☁️</button>
+    <span id="cloudStatus" style="font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace;white-space:nowrap"></span>
   </div>
 </div>
 
@@ -619,6 +621,31 @@ body{background:var(--bg);color:var(--text);font-family:'Manrope',sans-serif;fon
   </div>
 </div>
 
+<!-- CLOUD MODAL -->
+<div class="mov" id="cloudModal">
+  <div class="mo">
+    <div class="mo-t">☁️ Синхронізація з Google-таблицею</div>
+    <div class="mf" style="margin-bottom:11px">
+      <label>URL веб-застосунку (Apps Script)</label>
+      <input type="url" id="c_url" placeholder="https://script.google.com/macros/s/…/exec">
+    </div>
+    <div class="mf" style="margin-bottom:6px">
+      <label>Секретний ключ (як у скрипті)</label>
+      <input type="text" id="c_secret" placeholder="напр. ltex-2026">
+    </div>
+    <label class="cr" style="border:none;padding:8px 0"><input type="checkbox" id="c_auto"><span class="cl">Автосинхронізація при збереженні</span></label>
+    <div style="font-size:10px;color:var(--muted);line-height:1.6;margin:4px 0 16px">
+      Дані стікатимуться в спільну таблицю й будуть доступні з будь-якого пристрою.<br>
+      Як налаштувати — див. <b>CLOUD_SETUP.md</b> та <b>google-apps-script.gs</b> у репозиторії.
+    </div>
+    <div class="ma">
+      <button class="btn bs" onclick="closeCloud()">Закрити</button>
+      <button class="btn bs" onclick="syncNow(false)">🔄 Синхронізувати зараз</button>
+      <button class="btn bp" onclick="saveCloud()">Зберегти</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -636,6 +663,86 @@ const dTgt=()=>({
   newf_ig:500, newf_tt:1000, newf_fb:200, newf_yt:100, growth:1800,
   ig_stories:2, ig_feed:3, ig_reels:3, tt_vids:4, fb_posts:3, yt:4
 });
+
+// ── CLOUD SYNC (Google Sheets через Apps Script) ──
+const CLOUDCFG='ltex_cloud_v1',SYNCMETA='ltex_syncmeta_v1';
+const gCloud=()=>{try{return JSON.parse(localStorage.getItem(CLOUDCFG)||'{}')}catch{return{}}};
+const sCloud=c=>localStorage.setItem(CLOUDCFG,JSON.stringify(c));
+const gMeta=()=>{try{return JSON.parse(localStorage.getItem(SYNCMETA)||'{}')}catch{return{}}};
+const sMeta=m=>localStorage.setItem(SYNCMETA,JSON.stringify(m));
+function cloudSet(msg,ok){const e=document.getElementById('cloudStatus');if(!e)return;e.textContent=msg;e.style.color=ok===true?'var(--green)':ok===false?'var(--red)':'var(--muted)';}
+let _syncTimer=null;
+function markDirty(key){const m=gMeta();m[key]=Date.now();sMeta(m);const c=gCloud();if(c.url&&c.auto!==false){clearTimeout(_syncTimer);_syncTimer=setTimeout(()=>syncNow(true),1500);}}
+
+function openCloud(){const c=gCloud();document.getElementById('c_url').value=c.url||'';document.getElementById('c_secret').value=c.secret||'';document.getElementById('c_auto').checked=c.auto!==false;document.getElementById('cloudModal').classList.add('open');}
+function closeCloud(){document.getElementById('cloudModal').classList.remove('open');}
+function saveCloud(){
+  const url=document.getElementById('c_url').value.trim();
+  const secret=document.getElementById('c_secret').value.trim();
+  const auto=document.getElementById('c_auto').checked;
+  sCloud({url,secret,auto});closeCloud();showToast('Налаштування хмари збережено');
+  if(url)syncNow(false);else cloudSet('');
+}
+
+async function cloudPull(){
+  const cfg=gCloud();
+  const u=cfg.url+(cfg.url.includes('?')?'&':'?')+'k='+encodeURIComponent(cfg.secret||'');
+  const res=await fetch(u,{method:'GET',redirect:'follow'});
+  const j=await res.json();
+  if(!j.ok)throw new Error(j.error||'read error');
+  return j;
+}
+async function cloudPush(data,meta){
+  const cfg=gCloud();
+  const res=await fetch(cfg.url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({secret:cfg.secret||'',data,meta})});
+  const j=await res.json();
+  if(!j.ok)throw new Error(j.error||'write error');
+  return j;
+}
+
+async function syncNow(silent){
+  const cfg=gCloud();
+  if(!cfg.url){if(!silent){openCloud();}return;}
+  cloudSet('☁️ синхронізація…',null);
+  try{
+    const pulled=await cloudPull();
+    const cData=pulled.data||{},cMeta=pulled.meta||{},lMeta=gMeta();
+    const outData={},outMeta={};
+
+    // 1) Щоденні звіти (DB) — об'єднання за датами
+    {
+      const localDB=gDB();
+      let cloudDB={};try{cloudDB=JSON.parse(cData[DB]||'{}')}catch{}
+      const lm=lMeta[DB]||0,cm=cMeta[DB]||0;
+      const merged=cm>=lm?{...localDB,...cloudDB}:{...cloudDB,...localDB};
+      sDB(merged);
+      outData[DB]=JSON.stringify(merged);outMeta[DB]=Math.max(lm,cm)||Date.now();
+    }
+    // 2) Прості сховища (вірусне / ROAS / цілі) — останній запис перемагає
+    [VDB,RDB,TDB].forEach(key=>{
+      const lm=lMeta[key]||0,cm=cMeta[key]||0;
+      const localVal=localStorage.getItem(key),cloudVal=cData[key];
+      let val,ts;
+      if(cm>lm&&cloudVal!=null){val=cloudVal;ts=cm;localStorage.setItem(key,cloudVal);}
+      else{val=localVal!=null?localVal:cloudVal;ts=Math.max(lm,cm);if(localVal==null&&cloudVal!=null)localStorage.setItem(key,cloudVal);}
+      if(val!=null){outData[key]=val;outMeta[key]=ts||Date.now();}
+    });
+
+    await cloudPush(outData,outMeta);
+    sMeta(outMeta);
+
+    // Оновити UI з об'єднаних даних
+    const di=document.getElementById('rDate');
+    if(di&&gDB()[di.value])rst(gDB()[di.value]);
+    renderViral();renderRoas();if(document.getElementById('histWrap').classList.contains('open'))renderHist();upd();
+    const t=new Date();
+    cloudSet('☁️ '+t.toLocaleTimeString('uk-UA',{hour:'2-digit',minute:'2-digit'}),true);
+    if(!silent)showToast('Синхронізовано з таблицею');
+  }catch(err){
+    cloudSet('☁️ помилка',false);
+    if(!silent)showToast('Помилка синхр.: '+err.message);
+  }
+}
 
 const gv=id=>(document.getElementById(id)||{}).value||'';
 const gn=id=>parseInt(gv(id))||0;
@@ -687,7 +794,7 @@ function rst(d){
 function saveReport(){
   const date=document.getElementById('rDate').value;
   if(!date){alert('Виберіть дату!');return;}
-  const db=gDB();db[date]=col();sDB(db);
+  const db=gDB();db[date]=col();sDB(db);markDirty(DB);
   const btn=document.getElementById('saveBtn');
   btn.textContent='✓ Збережено';btn.classList.add('ok');
   setTimeout(()=>{btn.textContent='💾 Зберегти';btn.classList.remove('ok');},2000);
@@ -699,7 +806,7 @@ function loadReport(date){
 }
 function delReport(date){
   if(!confirm(`Видалити ${fmtD(date)}?`))return;
-  const db=gDB();delete db[date];sDB(db);renderHist();showToast('Видалено');
+  const db=gDB();delete db[date];sDB(db);markDirty(DB);renderHist();showToast('Видалено');
 }
 
 function swTab(n,btn){
@@ -898,9 +1005,9 @@ function renderViral(){
   }).join('');
   setText('viralTotal',`${fmt(tb)} грн`);
 }
-function addViral(){const r=gVDB();r.push({p:'tiktok',url:'',date:todayStr(),v7:0,v30:0});sVDB(r);renderViral();upd();}
-function uv(i,f,v){const r=gVDB();r[i][f]=v;sVDB(r);renderViral();upd();}
-function dv(i){const r=gVDB();r.splice(i,1);sVDB(r);renderViral();upd();}
+function addViral(){const r=gVDB();r.push({p:'tiktok',url:'',date:reportDateStr(),v7:0,v30:0});sVDB(r);markDirty(VDB);renderViral();upd();}
+function uv(i,f,v){const r=gVDB();r[i][f]=v;sVDB(r);markDirty(VDB);renderViral();upd();}
+function dv(i){const r=gVDB();r.splice(i,1);sVDB(r);markDirty(VDB);renderViral();upd();}
 
 // ROAS TRACKER
 function calcRoasBonus(){return gRDB().reduce((s,r)=>{const roas=r.spend>0?r.revenue/r.spend:0;return s+roasBon(roas);},0);}
@@ -922,9 +1029,9 @@ function renderRoas(){
   }).join('');
   setText('roasTotal',`${fmt(tb)} грн`);
 }
-function addRoas(){const r=gRDB();r.push({name:'',spend:0,revenue:0});sRDB(r);renderRoas();upd();}
-function ur(i,f,v){const r=gRDB();r[i][f]=v;sRDB(r);renderRoas();upd();}
-function dr(i){const r=gRDB();r.splice(i,1);sRDB(r);renderRoas();upd();}
+function addRoas(){const r=gRDB();r.push({name:'',spend:0,revenue:0});sRDB(r);markDirty(RDB);renderRoas();upd();}
+function ur(i,f,v){const r=gRDB();r[i][f]=v;sRDB(r);markDirty(RDB);renderRoas();upd();}
+function dr(i){const r=gRDB();r.splice(i,1);sRDB(r);markDirty(RDB);renderRoas();upd();}
 
 // HELPERS
 function sCard(id,t,c){const e=document.getElementById(id);if(!e)return;e.textContent=t;e.className='sc-val '+c;}
@@ -989,6 +1096,7 @@ function saveTgt(){
     ig_stories:n('t_ig_stories')||2, ig_feed:n('t_ig_feed')||3, ig_reels:n('t_ig_reels')||3,
     tt_vids:n('t_tt_vids')||4, fb_posts:n('t_fb_posts')||3, yt:n('t_yt')||4
   }));
+  markDirty(TDB);
   closeTgt();showToast('Цілі збережено!');upd();
 }
 
@@ -1047,6 +1155,9 @@ document.addEventListener('DOMContentLoaded',()=>{
     upd();
   });
   document.getElementById('tgtModal').addEventListener('click',e=>{if(e.target===e.currentTarget)closeTgt();});
+  document.getElementById('cloudModal').addEventListener('click',e=>{if(e.target===e.currentTarget)closeCloud();});
+  // Авто-підтягування з хмари при відкритті
+  if(gCloud().url)syncNow(true);
 });
 </script>
 </body>
