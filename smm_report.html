@@ -181,7 +181,8 @@ body{background:var(--bg);color:var(--text);font-family:'Manrope',sans-serif;fon
     <div><div class="logo-t">SMM ЗВІТ</div><div class="logo-s">secondopt.com.ua</div></div>
   </div>
   <div class="hctrls">
-    <input type="date" class="di" id="rDate">
+    <span style="font-size:10px;color:var(--muted);font-weight:700">📅 Звітний день:</span>
+    <input type="date" class="di" id="rDate" title="Звітний день — попередній робочий день (звіт до 10:00 за попередній)">
     <button class="btn bs" onclick="window.print()">🖨 Друк</button>
     <button class="btn bs" onclick="openTgt()">⚙️ Цілі</button>
     <button class="btn bs" onclick="sendEmail()">✉️ Надіслати</button>
@@ -932,6 +933,14 @@ function setText(id,t){const e=document.getElementById(id);if(e)e.textContent=t;
 function bp(id,v,max){const e=document.getElementById(id);if(e)e.style.width=(max?Math.min(100,v/max*100):Math.min(100,v))+'%';}
 
 function todayStr(){return new Date().toISOString().split('T')[0];}
+// Звітний день = попередній робочий день (звіт роблять до 10:00 за попередній).
+// Пн → Пт (−3), Нд → Пт (−2), Сб → Пт (−1), інші дні → вчора (−1).
+function reportDateStr(){
+  const d=new Date(),day=d.getDay();
+  const back=day===1?3:day===0?2:1;
+  d.setDate(d.getDate()-back);
+  return d.toISOString().split('T')[0];
+}
 function getWD(ds){
   const d=new Date(ds),day=d.getDay(),diff=d.getDate()-day+(day===0?-6:1);
   const mon=new Date(d.setDate(diff));
@@ -1023,9 +1032,9 @@ function showToast(m){const t=document.getElementById('toast');t.textContent='�
 
 document.addEventListener('DOMContentLoaded',()=>{
   const di=document.getElementById('rDate');
-  di.value=todayStr();
+  di.value=reportDateStr();
   const db=gDB();
-  if(db[todayStr()])rst(db[todayStr()]);
+  if(db[di.value])rst(db[di.value]);
   renderViral();renderRoas();upd();
   di.addEventListener('change',()=>{
     const d=di.value;
